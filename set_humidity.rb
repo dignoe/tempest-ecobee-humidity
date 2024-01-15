@@ -1,28 +1,171 @@
 #!/usr/bin/env ruby
+# frozen_string_literal: true
 
-require 'net/http'
+require 'net/https'
 require 'json'
 require 'yaml'
-require 'optparse'
-# Rollbar for errors
 
-# TODO: turn into docker image, cron job to run every hour
+# Set variables
 
-HOURS = 18 || ENV['HOURS']
-MAX_HUMIDITY = 45 || ENV['MAX_HUMIDITY']
-MIN_HUMIDITY = 15
-TEMPEST_BASE_URI = 'https://swd.weatherflow.com/swd/rest/better_forecast'.freeze
+CONFIG = YAML.load_file('/data/config.yml')
+HOURS = CONFIG['hours']
+MAX_HUMIDITY = CONFIG['max_humidity']
+MIN_HUMIDITY = CONFIG['min_humidity']
 
-# Use ENV variables set by docker instead of YAML file
-TEMPEST_TOKEN = ENV['TEMPEST_TOKEN']
-STATION_ID = ENV['TEMPEST_STATION_ID']
-ECOBEE_API_KEY = ENV['ECOBEE_API_KEY']
+TEMPEST_TOKEN = CONFIG['tempest']['token']
+STATION_ID = CONFIG['tempest']['station_id']
+TEMPEST_URI = 'https://swd.weatherflow.com/swd/rest/better_forecast?units_temp=f' \
+              "&station_id=#{STATION_ID}&token=#{TEMPEST_TOKEN}"
+
+ECOBEE_HTTP = Net::HTTP.new('api.ecobee.com', 443)
+ECOBEE_HTTP.use_ssl = true
+ECOBEE_API_KEY = CONFIG['ecobee']['api_key']
+
+# Tempest
 
 def tempest_data
-  url = "#{TEMPEST_BASE_URI}?units_temp=f&station_id=#{STATION_ID}" \
-        "&token=#{TEMPEST_TOKEN}"
+  JSON.parse(Net::HTTP.get(URI(TEMPEST_URI)))
+end
 
-  JSON.parse(Net::HTTP.get(URI(url)))
+# Ecobee authentication
+
+# Prompts user to authenticate if there is no token
+# Refreshes the token if it's expired
+def authorize_ecobee
+  return if ecobee_token?
+
+  response = request_ecobee_pin
+
+  p "Sign in to Ecobee and enter the pin in My Apps #{response['ecobeePin']}."
+
+  request_ecobee_token_from_pin(response)
+end
+
+# do we have a token from Ecobee?
+def ecobee_token?
+  load_ecobee_token
+  return false if @ecobee_auth.nil?
+
+  refresh_ecobee_token if @ecobee_auth[:expires_at] < (Time.now + 60)
+
+  true
+end
+
+def load_ecobee_token
+  return unless File.exist?('/data/ecobee_auth.yml')
+
+  @ecobee_auth = YAML.load_file('/data/ecobee_auth.yml', symbolize_names: true)
+end
+
+def save_ecobee_token!(response)
+  @ecobee_auth = {
+    token: response['access_token'],
+    type: response['token_type'],
+    expires_at: Time.now + response['expires_in'].to_i,
+    refresh_token: response['refresh_token']
+  }
+
+  File.write('/data/ecobee_auth.yml', YAML.dump(@ecobee_auth))
+end
+
+def request_ecobee_pin
+  url = "/authorize?response_type=ecobeePin&client_id=#{ECOBEE_API_KEY}&scope=smartWrite"
+  request = Net::HTTP::Get.new(url)
+  response = ECOBEE_HTTP.request(request)
+
+  unless response.code == '200'
+    p JSON.parse(response.body)['status']['message']
+    raise 'Getting Ecobee PIN failed'
+  end
+
+  JSON.parse(response.body)
+end
+
+def request_ecobee_token_from_pin(pin_response)
+  expires_at = Time.now + (60 * pin_response['expires_in'].to_i)
+  data = {
+    grant_type: 'ecobeePin',
+    code: pin_response['code'],
+    client_id: ECOBEE_API_KEY
+  }
+
+  poll_for_auth_token(expires_at, pin_response['interval'].to_i, data)
+end
+
+def ecobee_auth_token_request(data)
+  request = Net::HTTP::Post.new('/token')
+  request.set_form_data(data)
+  ECOBEE_HTTP.request(request)
+end
+
+def poll_for_auth_token(expires_at, interval, data)
+  while Time.now < expires_at
+    sleep interval
+
+    response = ecobee_auth_token_request(data)
+
+    next if response.code == '401'
+    raise response.body['error_description'] unless response.code == '200'
+
+    save_ecobee_token!(JSON.parse(response.body))
+    p 'Authorization successful'
+    return
+  end
+
+  raise 'Ecobee PIN authorization expired'
+end
+
+def refresh_ecobee_token
+  data = {
+    grant_type: 'refresh_token',
+    refresh_token: @ecobee_auth[:refresh_token],
+    client_id: ECOBEE_API_KEY
+  }
+
+  request = Net::HTTP::Post.new('/token')
+  request.set_form_data(data)
+  response = ECOBEE_HTTP.request(request)
+
+  raise 'Refreshing Ecobee token failed' unless response.code == '200'
+
+  save_ecobee_token!(JSON.parse(response.body))
+end
+
+def ecobee_auth_header
+  "#{@ecobee_auth[:type]} #{@ecobee_auth[:token]}"
+end
+
+# Calculate & set humidity
+
+def active_thermostats(json)
+  therms = json['thermostatList'].select do |t|
+    t['settings']['hasHumidifier'] && t['settings']['humidifierMode'] == 'manual'
+  end
+
+  therms.map do |t|
+    { identifier: t['identifier'], humidity: t['settings']['humidity'].to_i }
+  end
+end
+
+# find thermostats that have humidifier and humidifier is on
+def humidifier_on?
+  data = { selection: {
+    selectionType: 'registered', includeSettings: true, includeEquipmentStatus: true
+  } }.to_json
+  request = Net::HTTP::Get.new("/1/thermostat?body=#{data}")
+  request['Authorization'] = ecobee_auth_header
+  request['Content-Type'] = 'application/json;charset=UTF-8'
+  response = ECOBEE_HTTP.request(request)
+
+  @thermostats = active_thermostats(JSON.parse(response.body))
+
+  @thermostats.any?
+end
+
+# The humidity level to set
+def target_humidity_level
+  h = (0.5 * forecasted_low_temp + 25).ceil
+  [[MIN_HUMIDITY, h].max, MAX_HUMIDITY].min
 end
 
 # Gets the lowest temp currently, or forecasted in the next HOURS
@@ -41,66 +184,31 @@ def forecasted_low_temp
   min_temp
 end
 
-# The humidity level to set
-def target_humidity_level
-  h = (0.5 * forecasted_low_temp + 25).ceil
-  [[MIN_HUMIDITY, h].max, MAX_HUMIDITY].min
+def update_humidity?(target_humidity)
+  @thermostats.reject! { |t| t[:humidity] == target_humidity }
+  @thermostats.any?
 end
 
-def get_ecobee_pin
-  url = "https://api.ecobee.com/authorize?response_type=ecobeePin" \
-        "&client_id=#{ECOBEE_API_KEY}&scope=smartWrite"
-
-  JSON.parse(Net::HTTP.get(URI(url)))
+def ecobee_update_data(target_humidity)
+  {
+    selection: {
+      selectionType: 'thermostats',
+      selectionMatch: @thermostats.map { |t| t[:identifier] }.join(',')
+    },
+    thermostat: { settings: { humidity: target_humidity } }
+  }.to_json
 end
 
-def get_ecobee_token_from_challenge(token)
-  url = "https://api.ecobee.com/token?grant_type=ecobeePin" \
-        "&code=#{token}&client_id=#{ECOBEE_API_KEY}"
+def push_ecobee_humidity_level(target_humidity)
+  p "Updating target humidity level on #{@thermostats.map { |t| t[:identifier] }}"
 
-  JSON.parse(Net::HTTP.post(URI(url)))
-end
+  request = Net::HTTP::Post.new('/1/thermostat')
+  request['Authorization'] = ecobee_auth_header
+  request['Content-Type'] = 'application/json;charset=UTF-8'
+  request.body = ecobee_update_data(target_humidity)
+  response = ECOBEE_HTTP.request(request)
 
-def refresh_ecobee_token
-  url = "https://api.ecobee.com/token?grant_type=refresh_token" \
-        "&refresh_token=#{ecobee_refresh_token}&client_id=#{ECOBEE_API_KEY}"
-
-  response = JSON.parse(Net::HTTP.post(URI(url)))
-  save_ecobee_token!(response)
-end
-
-def save_ecobee_token!(response)
-  @ecobee_access_token = response['access_token']
-  #@ecobee_refresh_token = response['refresh_token']
-  # save refresh token
-end
-
-# Requests an auth token from Ecobee
-def authorize_ecobee
-  response = get_ecobee_pin
-
-  p "Sign in to Ecobee and enter the pin in My Apps #{response['ecobeePin']}"
-  challenge = STDIN.gets.chomp
-
-  p "Press enter when you've added your pin"
-  STDIN.gets
-
-  response = get_ecobee_token_from_challenge(response['code'])
-  save_ecobee_token!(response)
-
-  p 'Authorization successful'
-end
-
-def set_ecobee_humidity_level
-
-end
-
-def humidifier_on?
-  true
-end
-
-def update_humidity?(t)
-  true
+  p 'Updating humdity failed' unless response.code == '200'
 end
 
 # Sets the humidity level on the Ecobee thermostat
@@ -112,21 +220,15 @@ def set_humidity
 
   return unless update_humidity?(t)
 
-  set_ecobee_humidity_level
+  push_ecobee_humidity_level(t)
 end
 
-# Use optparse to either request a new Ecobee token or run normally
+def run
+  loop do
+    set_humidity
+    sleep 3600
+  end
+end
 
-# Authorize script
-# authorize_ecobee
-# Get list of thermostats
-# save thermostat identifier
-# default
-
-# Default run script
-# Refresh Ecobee token
-# Get Ecobee status
-# If humidifier is on, get forecast and determine humidity level
-# If humidity level changed, update humidity level
-
-set_humidity
+authorize_ecobee
+run

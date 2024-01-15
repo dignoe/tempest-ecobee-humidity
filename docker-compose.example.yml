@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  humidity_optimizer:
+    container_name: humidity_optimizer
+    build: ./
+    restart: unless-stopped
+    volumes:
+      - ecobee_auth:/data
+      - ./config.yml:/data/config.yml
+
+volumes:
+  ecobee_auth:

@@ -1,0 +1,8 @@
+tempest:
+  token: 'Your token'
+  station_id: 12345
+ecobee:
+  api_key: 'Your api key'
+hours: 18
+max_humidity: 45
+min_humidity: 15

@@ -56,4 +56,4 @@ build-iPhoneSimulator/
 # .rubocop-https?--*
 
 docker-compose.yml
-data.yml
+config.yml
