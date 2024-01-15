@@ -54,7 +54,9 @@ end
 def load_ecobee_token
   return unless File.exist?('/data/ecobee_auth.yml')
 
-  @ecobee_auth = YAML.load_file('/data/ecobee_auth.yml', symbolize_names: true)
+  @ecobee_auth = YAML.load_file(
+    '/data/ecobee_auth.yml', symbolize_names: true, permitted_classes: [Time, Symbol]
+  )
 end
 
 def save_ecobee_token!(response)
