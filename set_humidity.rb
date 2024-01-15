@@ -143,7 +143,7 @@ def active_thermostats(json)
   end
 
   therms.map do |t|
-    { identifier: t['identifier'], humidity: t['settings']['humidity'].to_i }
+    { identifier: t['identifier'], name: t['name'], humidity: t['settings']['humidity'].to_i }
   end
 end
 
@@ -164,8 +164,11 @@ end
 
 # The humidity level to set
 def target_humidity_level
-  h = (0.5 * forecasted_low_temp + 25).ceil
-  [[MIN_HUMIDITY, h].max, MAX_HUMIDITY].min
+  humidity_level = (0.5 * forecasted_low_temp + 25).ceil
+  target = [[MIN_HUMIDITY, humidity_level].max, MAX_HUMIDITY].min
+
+  p "Humidity level should be set to #{target}%"
+  target
 end
 
 # Gets the lowest temp currently, or forecasted in the next HOURS
@@ -179,7 +182,7 @@ def forecasted_low_temp
                                   .map { |f| f['air_temperature'] }
   min_temp = temps.min
 
-  p "Lowest temp is #{min_temp}º"
+  p "Lowest forecasted temperature in the next #{HOURS} hours is #{min_temp}º"
 
   min_temp
 end
@@ -200,7 +203,7 @@ def ecobee_update_data(target_humidity)
 end
 
 def push_ecobee_humidity_level(target_humidity)
-  p "Updating target humidity level on #{@thermostats.map { |t| t[:identifier] }}"
+  p "Updating target humidity level on #{@thermostats.map { |t| t[:name] }.join(', ')}"
 
   request = Net::HTTP::Post.new('/1/thermostat')
   request['Authorization'] = ecobee_auth_header
@@ -213,14 +216,16 @@ end
 
 # Sets the humidity level on the Ecobee thermostat
 def set_humidity
+  p 'Checking humidifier status...'
   return unless humidifier_on?
 
   t = target_humidity_level
-  p "Set humidity to #{t}%"
 
-  return unless update_humidity?(t)
-
-  push_ecobee_humidity_level(t)
+  if update_humidity?(t)
+    push_ecobee_humidity_level(t)
+  else
+    p 'No update needed'
+  end
 end
 
 def run
