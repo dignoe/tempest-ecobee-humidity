@@ -11,6 +11,7 @@ CONFIG = YAML.load_file('/data/config.yml')
 HOURS = CONFIG['hours']
 MAX_HUMIDITY = CONFIG['max_humidity']
 MIN_HUMIDITY = CONFIG['min_humidity']
+OFFSET = CONFIG['humidity_offset']
 
 TEMPEST_TOKEN = CONFIG['tempest']['token']
 STATION_ID = CONFIG['tempest']['station_id']
@@ -46,7 +47,7 @@ def ecobee_token?
   load_ecobee_token
   return false if @ecobee_auth.nil?
 
-  refresh_ecobee_token if @ecobee_auth[:expires_at] < (Time.now + 60)
+  refresh_ecobee_token if ecobee_token_expired?
 
   true
 end
@@ -133,7 +134,13 @@ def refresh_ecobee_token
   save_ecobee_token!(JSON.parse(response.body))
 end
 
+def ecobee_token_expired?
+  @ecobee_auth[:expires_at] < Time.now
+end
+
 def ecobee_auth_header
+  refresh_ecobee_token if ecobee_token_expired?
+
   "#{@ecobee_auth[:type]} #{@ecobee_auth[:token]}"
 end
 
@@ -151,13 +158,13 @@ end
 
 # find thermostats that have humidifier and humidifier is on
 def humidifier_on?
-  data = { selection: {
-    selectionType: 'registered', includeSettings: true, includeEquipmentStatus: true
-  } }.to_json
+  data = { selection: { selectionType: 'registered', includeSettings: true } }.to_json
   request = Net::HTTP::Get.new("/1/thermostat?body=#{data}")
   request['Authorization'] = ecobee_auth_header
   request['Content-Type'] = 'application/json;charset=UTF-8'
   response = ECOBEE_HTTP.request(request)
+
+  raise "Getting humidifier status failed with #{response.body}" unless response.code == '200'
 
   @thermostats = active_thermostats(JSON.parse(response.body))
 
@@ -166,7 +173,7 @@ end
 
 # The humidity level to set
 def target_humidity_level
-  humidity_level = (0.5 * forecasted_low_temp + 25).ceil
+  humidity_level = (0.5 * forecasted_low_temp + 25 + OFFSET).ceil
   target = [[MIN_HUMIDITY, humidity_level].max, MAX_HUMIDITY].min
 
   p "Humidity level should be set to #{target}%"
@@ -213,7 +220,7 @@ def push_ecobee_humidity_level(target_humidity)
   request.body = ecobee_update_data(target_humidity)
   response = ECOBEE_HTTP.request(request)
 
-  p 'Updating humdity failed' unless response.code == '200'
+  raise "Updating humidity failed with #{response.body}" unless response.code == '200'
 end
 
 # Sets the humidity level on the Ecobee thermostat

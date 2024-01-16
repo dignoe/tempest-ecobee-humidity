@@ -6,3 +6,4 @@ ecobee:
 hours: 18
 max_humidity: 45
 min_humidity: 15
+humidity_offset: 0
