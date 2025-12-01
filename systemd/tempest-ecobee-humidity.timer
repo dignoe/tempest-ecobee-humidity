@@ -1,0 +1,11 @@
+[Unit]
+Description=Hourly Tempest -> Ecobee humidity sync
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+Unit=tempest-ecobee-humidity.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,17 @@
+[Unit]
+Description=Update Ecobee humidity using Tempest data
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/opt/tempest-ecobee-humidity/set_humidity.rb
+
+[Service]
+Type=oneshot
+Environment=CONFIG_PATH=/etc/tempest-ecobee-humidity/config.yml
+Environment=STATE_DIR=/var/lib/tempest-ecobee-humidity
+WorkingDirectory=/opt/tempest-ecobee-humidity
+ExecStart=/usr/bin/env ruby /opt/tempest-ecobee-humidity/set_humidity.rb
+Nice=10
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

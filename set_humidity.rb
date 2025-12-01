@@ -4,10 +4,16 @@
 require 'net/https'
 require 'json'
 require 'yaml'
+require 'fileutils'
 
 # Set variables
 
-CONFIG = YAML.load_file('/data/config.yml')
+CONFIG_PATH = ENV.fetch('CONFIG_PATH', '/etc/tempest-ecobee-humidity/config.yml')
+abort("Config file not found at #{CONFIG_PATH}") unless File.exist?(CONFIG_PATH)
+CONFIG = YAML.load_file(CONFIG_PATH)
+STATE_DIR = ENV.fetch('STATE_DIR', '/var/lib/tempest-ecobee-humidity')
+ECOBEE_AUTH_PATH = File.join(STATE_DIR, 'ecobee_auth.yml')
+FileUtils.mkdir_p(File.dirname(ECOBEE_AUTH_PATH))
 HOURS = CONFIG['hours']
 MAX_HUMIDITY = CONFIG['max_humidity']
 MIN_HUMIDITY = CONFIG['min_humidity']
@@ -53,10 +59,10 @@ def ecobee_token?
 end
 
 def load_ecobee_token
-  return unless File.exist?('/data/ecobee_auth.yml')
+  return unless File.exist?(ECOBEE_AUTH_PATH)
 
   @ecobee_auth = YAML.load_file(
-    '/data/ecobee_auth.yml', symbolize_names: true, permitted_classes: [Time, Symbol]
+    ECOBEE_AUTH_PATH, symbolize_names: true, permitted_classes: [Time, Symbol]
   )
 end
 
@@ -68,7 +74,7 @@ def save_ecobee_token!(response)
     refresh_token: response['refresh_token']
   }
 
-  File.write('/data/ecobee_auth.yml', YAML.dump(@ecobee_auth))
+  File.write(ECOBEE_AUTH_PATH, YAML.dump(@ecobee_auth))
 end
 
 def request_ecobee_pin
@@ -238,11 +244,10 @@ def set_humidity
 end
 
 def run
-  loop do
-    set_humidity
-    sleep 3600
-  end
+  set_humidity
 end
 
-authorize_ecobee
-run
+if __FILE__ == $PROGRAM_NAME
+  authorize_ecobee
+  run
+end
