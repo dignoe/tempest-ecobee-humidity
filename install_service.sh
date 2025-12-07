@@ -30,6 +30,12 @@ elif [[ ! -f "${CONFIG_DIR}/config.yml" && -f "${SCRIPT_DIR}/config.example.yml"
   echo "Copied config.example.yml to ${CONFIG_DIR}/config.yml. Update it with your credentials."
 fi
 
+# Copy ecobee state file if present
+# For upgrading to new service-based installation
+if [[ -f "${SCRIPT_DIR}/ecobee_auth.yml" ]]; then
+  install -m 600 "${SCRIPT_DIR}/ecobee_auth.yml" "${STATE_DIR}/ecobee_auth.yml"
+fi
+
 # Install systemd units
 install -m 644 "${SCRIPT_DIR}/systemd/${SERVICE_NAME}.service" "${SERVICE_PATH}"
 install -m 644 "${SCRIPT_DIR}/systemd/${SERVICE_NAME}.timer" "${TIMER_PATH}"
